@@ -5,8 +5,8 @@ import com.example.products.ProductRepository
 import com.example.products.domain.NoCategory
 import com.example.products.domain.Product
 import com.example.products.domain.ProductCategory
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.*
 
 class ProductListViewModel internal constructor(
     private val productRepository: ProductRepository
@@ -20,30 +20,47 @@ class ProductListViewModel internal constructor(
     val spinner: LiveData<Boolean>
         get() = _spinner
 
-    private val productCategory = MutableLiveData<ProductCategory>(NoCategory)
+    private val productCategory = MutableStateFlow<ProductCategory>(NoCategory)
 
-    val products: LiveData<List<Product>> = productCategory.switchMap { category ->
+    @ExperimentalCoroutinesApi
+    val products: LiveData<List<Product>> = productCategory.flatMapLatest { category ->
         if (category == NoCategory) {
             productRepository.products
         } else {
             productRepository.getProductsWithCategory(category)
         }
-    }
+    }.asLiveData()
 
     init {
         clearProductCategoryNumber()
+
+        loadDataFor(productCategory) {
+            if (it == NoCategory) {
+                productRepository.tryUpdateRecentProductsCache()
+            } else {
+                productRepository.tryUpdateRecentProductsForCategoryCache(it)
+            }
+        }
+
+//        productCategory.mapLatest { category ->
+//            _spinner.value = true
+//            if (category == NoCategory) {
+//                productRepository.tryUpdateRecentProductsCache()
+//            } else {
+//                productRepository.tryUpdateRecentProductsForCategoryCache(category)
+//            }
+//        }
+//        .onEach {  _spinner.value = false }
+//        .catch { throwable ->  _snackbar.value = throwable.message  }
+//        .launchIn(viewModelScope)
     }
 
     fun clearProductCategoryNumber() {
         productCategory.value = NoCategory
-
-        launchDataLoad { productRepository.tryUpdateRecentProductsCache() }
     }
 
     fun setProductCategoryNumber(num: Int) {
         productCategory.value = ProductCategory(num)
-
-        launchDataLoad { productRepository.tryUpdateRecentProductsForCategoryCache(ProductCategory(num)) }
     }
 
     fun isFiltered() = productCategory.value != NoCategory
@@ -52,17 +69,14 @@ class ProductListViewModel internal constructor(
         _snackbar.value = null
     }
 
-    private fun launchDataLoad(block: suspend () -> Unit): Job {
-        return viewModelScope.launch {
-            try {
-                _spinner.value = true
-                block()
-            } catch (error: Throwable) {
-                _snackbar.value = error.message
-            } finally {
-                _spinner.value = false
-            }
+    private fun <T> loadDataFor(source: StateFlow<T>, block: suspend (T) -> Unit) {
+        source.mapLatest { category ->
+            _spinner.value = true
+            block(category)
         }
+            .onEach {  _spinner.value = false }
+            .catch { throwable ->  _snackbar.value = throwable.message  }
+            .launchIn(viewModelScope)
     }
 
 }

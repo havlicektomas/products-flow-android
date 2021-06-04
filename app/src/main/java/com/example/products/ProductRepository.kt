@@ -1,16 +1,13 @@
 package com.example.products
 
 import androidx.annotation.AnyThread
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.liveData
-import androidx.lifecycle.map
-import androidx.lifecycle.switchMap
 import com.example.products.domain.Product
 import com.example.products.domain.ProductCategory
 import com.example.products.utils.CacheOnSuccess
 import com.example.products.utils.ComparablePair
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
 
 class ProductRepository private constructor(
@@ -24,30 +21,37 @@ class ProductRepository private constructor(
             networkService.customProductSortOrder()
         }
 
-    val products: LiveData<List<Product>> = liveData {
-        val productsLiveData = productDao.getProducts()
-        val customSortOrder = productListSortOrderCache.getOrAwait()
-        emitSource(productsLiveData.map { productList ->
-            productList.applySort(customSortOrder)
-        })
-    }
+    private val customSort = flow { emit(productListSortOrderCache.getOrAwait()) }
 
-    /*fun getProductsWithCategory(category: ProductCategory) = liveData {
-        val productsWithCategoryLiveData = productDao.getProductsWithCategory(category.number)
-        val customSortOrder = productListSortOrderCache.getOrAwait()
-        emitSource(productsWithCategoryLiveData.map { productList ->
-            productList.applySort(customSortOrder)
-        })
-    }*/
-
-    fun getProductsWithCategory(category: ProductCategory) =
-        productDao.getProductsWithCategory(category.number)
-            .switchMap { productList ->
-                liveData {
-                    val customSortOrder = productListSortOrderCache.getOrAwait()
-                    emit(productList.applyMainSafeSort(customSortOrder))
-                }
+    // In this version both operations run in parallel
+    val products: Flow<List<Product>>
+        get() = productDao.getProducts()
+            // When the result of customSort is available,
+            // this will combine it with the latest value from
+            // the flow above.  Thus, as long as both `products`
+            // and `sortOrder` have an initial value (their
+            // flow has emitted at least one value), any change
+            // to either `products` or `sortOrder`  will call
+            // `products.applySort(sortOrder)`.
+            .combine(customSort) { products, sortOrder ->
+                products.applySort(sortOrder)
             }
+            .flowOn(defaultDispatcher)
+            // Modifies the buffer of flowOn to store only the last result.
+            // If another result comes in before the previous one is read,
+            // it gets overwritten.
+            .conflate()
+
+
+    // In this version both operations run sequentially
+    fun getProductsWithCategory(category: ProductCategory): Flow<List<Product>> {
+        return productDao.getProductsWithCategory(category.number)
+            .map { products ->
+                val sortOrderFromNetwork = productListSortOrderCache.getOrAwait()
+                val nextValue = products.applyMainSafeSort(sortOrderFromNetwork)
+                nextValue
+            }
+    }
 
     private fun shouldUpdateProductsCache(): Boolean {
         // suspending function, so you can e.g. check the status of the database here
